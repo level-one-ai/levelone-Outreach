@@ -1,0 +1,189 @@
+[
+  {
+    "name": "trades_leads",
+    "type": "base",
+    "listRule": "",
+    "viewRule": "",
+    "createRule": "",
+    "updateRule": "",
+    "deleteRule": "",
+    "schema": [
+      { "name": "company_name", "type": "text", "required": true },
+      { "name": "location", "type": "text" },
+      { "name": "phone", "type": "text", "required": true },
+      { "name": "tps_verified", "type": "bool" },
+      {
+        "name": "tps_status",
+        "type": "select",
+        "options": {
+          "maxSelect": 1,
+          "values": ["unchecked", "clear", "listed", "error"]
+        }
+      },
+      { "name": "email", "type": "text" },
+      { "name": "website", "type": "text" },
+      { "name": "call_date_time", "type": "date" },
+      {
+        "name": "status",
+        "type": "select",
+        "required": true,
+        "options": {
+          "maxSelect": 1,
+          "values": ["scraped", "negative", "no_answer", "positive"]
+        }
+      },
+      { "name": "meeting_sent", "type": "bool" },
+      { "name": "place_id", "type": "text" },
+      { "name": "grid_cell", "type": "text" }
+    ],
+    "indexes": [
+      "CREATE UNIQUE INDEX `idx_trades_phone` ON `trades_leads` (`phone`)",
+      "CREATE UNIQUE INDEX `idx_trades_place_id` ON `trades_leads` (`place_id`) WHERE `place_id` != ''"
+    ]
+  },
+  {
+    "name": "b2b_contacts",
+    "type": "base",
+    "listRule": "",
+    "viewRule": "",
+    "createRule": "",
+    "updateRule": "",
+    "deleteRule": "",
+    "schema": [
+      { "name": "email", "type": "email", "required": true },
+      { "name": "contact_name", "type": "text" },
+      { "name": "company_name", "type": "text" },
+      { "name": "website", "type": "text" },
+      { "name": "linkedin_url", "type": "text" },
+      { "name": "email_verified", "type": "bool" },
+      { "name": "verification_score", "type": "number" }
+    ],
+    "indexes": [
+      "CREATE UNIQUE INDEX `idx_b2b_contact_email` ON `b2b_contacts` (`email`)"
+    ]
+  },
+  {
+    "name": "b2b_campaigns",
+    "type": "base",
+    "listRule": "",
+    "viewRule": "",
+    "createRule": "",
+    "updateRule": "",
+    "deleteRule": "",
+    "schema": [
+      { "name": "title", "type": "text", "required": true },
+      { "name": "offer_description", "type": "editor" },
+      { "name": "from_email", "type": "text", "required": true },
+      { "name": "active", "type": "bool" }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "b2b_outreach",
+    "type": "base",
+    "listRule": "",
+    "viewRule": "",
+    "createRule": "",
+    "updateRule": "",
+    "deleteRule": "",
+    "schema": [
+      {
+        "name": "contact",
+        "type": "relation",
+        "required": true,
+        "options": { "collectionId": "b2b_contacts", "maxSelect": 1 }
+      },
+      {
+        "name": "campaign",
+        "type": "relation",
+        "required": true,
+        "options": { "collectionId": "b2b_campaigns", "maxSelect": 1 }
+      },
+      {
+        "name": "kanban_stage",
+        "type": "select",
+        "required": true,
+        "options": {
+          "maxSelect": 1,
+          "values": ["sent_1", "followup_2d", "followup_5d", "replied"]
+        }
+      },
+      {
+        "name": "reply_sentiment",
+        "type": "select",
+        "options": {
+          "maxSelect": 1,
+          "values": ["pending", "positive", "negative", "no_reply"]
+        }
+      },
+      { "name": "ai_draft_reply", "type": "text" },
+      { "name": "call_booked", "type": "bool" },
+      { "name": "call_booked_at", "type": "date" },
+      { "name": "last_email_sent_at", "type": "date" },
+      { "name": "archived", "type": "bool" }
+    ],
+    "indexes": [
+      "CREATE UNIQUE INDEX `idx_outreach_contact_campaign` ON `b2b_outreach` (`contact`, `campaign`)"
+    ]
+  },
+  {
+    "name": "messages",
+    "type": "base",
+    "listRule": "",
+    "viewRule": "",
+    "createRule": "",
+    "updateRule": "",
+    "deleteRule": "",
+    "schema": [
+      {
+        "name": "outreach_run",
+        "type": "relation",
+        "options": { "collectionId": "b2b_outreach", "maxSelect": 1 }
+      },
+      {
+        "name": "direction",
+        "type": "select",
+        "options": { "maxSelect": 1, "values": ["inbound", "outbound"] }
+      },
+      { "name": "subject", "type": "text" },
+      { "name": "body", "type": "text" },
+      { "name": "sent_at", "type": "date" }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "scrape_runs",
+    "type": "base",
+    "listRule": "",
+    "viewRule": "",
+    "createRule": "",
+    "updateRule": "",
+    "deleteRule": "",
+    "schema": [
+      {
+        "name": "kind",
+        "type": "select",
+        "options": { "maxSelect": 1, "values": ["trades", "b2b"] }
+      },
+      {
+        "name": "status",
+        "type": "select",
+        "options": {
+          "maxSelect": 1,
+          "values": ["queued", "running", "complete", "failed"]
+        }
+      },
+      { "name": "params", "type": "json" },
+      { "name": "cells_total", "type": "number" },
+      { "name": "cells_done", "type": "number" },
+      { "name": "found", "type": "number" },
+      { "name": "imported", "type": "number" },
+      { "name": "duplicates", "type": "number" },
+      { "name": "blocked", "type": "number" },
+      { "name": "error", "type": "text" },
+      { "name": "started_at", "type": "date" },
+      { "name": "finished_at", "type": "date" }
+    ],
+    "indexes": []
+  }
+]
