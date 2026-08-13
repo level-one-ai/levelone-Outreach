@@ -1,0 +1,161 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ */
+/*  Level One palette — the single source of truth for the theme.      */
+/*  Values are lifted from the Level One Proposal Engine so the two    */
+/*  apps are visually indistinguishable. Change them here and the      */
+/*  whole system re-themes; nothing else hardcodes a color.            */
+/*                                                                     */
+/*  Written as space-separated RGB channels rather than hex, so        */
+/*  Tailwind's `rgb(var(--x) / <alpha-value>)` wiring can compose them  */
+/*  with opacity modifiers — `border-foreground/40` and friends need   */
+/*  the channels, not a finished color.                                */
+/* ------------------------------------------------------------------ */
+:root {
+  --color-canvas: 250 249 246; /* #faf9f6 */
+  --color-canvas-deep: 241 239 233; /* #f1efe9 */
+  --color-surface: 255 255 255; /* #ffffff */
+  --color-ink: 17 17 16; /* #111110 */
+  --color-muted: 107 106 102; /* #6b6a66 */
+  --color-line: 232 230 224; /* #e8e6e0 */
+
+  /* Status accents — muted on purpose. */
+  --color-positive: 47 111 79; /* #2f6f4f */
+  --color-negative: 154 59 59; /* #9a3b3b */
+  --color-pending: 138 106 47; /* #8a6a2f */
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  }
+
+  ::selection {
+    background: rgb(var(--color-ink));
+    color: rgb(var(--color-canvas));
+  }
+
+  /* Respect the OS setting. Every animation in this app is decorative —
+     none of it carries meaning that is lost when it is switched off. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-full bg-foreground px-8 py-3
+      text-fluid-sm font-medium uppercase tracking-widest text-cream shadow-lg shadow-black/10 transition-all
+      hover:opacity-90 active:scale-[0.98] focus-visible:outline focus-visible:outline-2
+      focus-visible:outline-offset-2 focus-visible:outline-foreground
+      disabled:cursor-not-allowed disabled:opacity-30 disabled:active:scale-100;
+  }
+
+  .btn-ghost {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-line
+      bg-white/70 backdrop-blur px-6 py-3 text-fluid-sm font-medium tracking-wide text-foreground
+      transition-all hover:border-foreground/40 active:scale-[0.98]
+      disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100;
+  }
+
+  /* Compact variant for dense surfaces — lead cards, kanban cards, toolbars. */
+  .btn-sm {
+    @apply min-h-9 px-4 py-2 text-fluid-xs;
+  }
+
+  .card {
+    @apply rounded-3xl border border-line bg-white/60 p-4 shadow-[0_24px_80px_-32px_rgba(17,17,16,0.18)] backdrop-blur-xl sm:p-6;
+  }
+
+  /* Tighter card for grid/kanban items, where the 3xl radius and heavy
+     blur of `.card` cost too much paint on a long list. */
+  .card-tight {
+    @apply rounded-2xl border border-line bg-surface p-4 shadow-card;
+  }
+
+  .field-label {
+    @apply mb-1.5 block text-fluid-xs font-semibold uppercase tracking-widest text-foreground;
+  }
+
+  .field-input {
+    @apply w-full rounded-2xl border border-line bg-white/70 px-4 py-3 text-fluid-base
+      text-foreground placeholder:text-muted/60 backdrop-blur outline-none transition-colors
+      focus:border-foreground/40 shadow-[0_8px_40px_-20px_rgba(17,17,16,0.15)];
+  }
+
+  /* Borderless inline input — used for the email field sitting directly on a
+     lead card, where a boxed input would fight the card's own border. */
+  .field-inline {
+    @apply w-full rounded-lg border border-transparent bg-canvas-deep/60 px-2.5 py-1.5 text-fluid-sm
+      text-foreground placeholder:text-muted/60 outline-none transition-colors
+      hover:border-line focus:border-foreground/40 focus:bg-surface;
+  }
+
+  .field-error {
+    @apply mt-1.5 text-fluid-xs font-medium text-red-600;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full border border-line bg-surface px-2.5 py-0.5
+      text-[0.68rem] font-medium uppercase tracking-wider text-muted;
+  }
+}
+
+/* ---------- Minimalist scrollbar for internal scroll regions ---------- */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--color-line)) transparent;
+}
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgb(var(--color-line));
+  border-radius: 9999px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--color-muted));
+}
+
+/* ---------- Skeleton shimmer ---------- */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: rgb(var(--color-line));
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(255 255 255 / 0.55),
+    transparent
+  );
+  animation: shimmer 1.6s infinite;
+}
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
