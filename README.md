@@ -6,8 +6,9 @@ one command centre:
 - **Trades cold calling** — scrape local trades from Google Maps using
   geographic grid partitioning, deduplicate by phone, screen against TPS/CTPS,
   and work the calling list.
-- **B2B cold email** — scrape and verify B2B contacts, enrol them in reusable
-  campaigns, track the follow-up sequence, and handle AI-classified replies.
+- **B2B cold email** — scrape and verify B2B contacts into a lead pool, queue
+  them into reusable campaigns, drip them out at a fixed daily limit, track the
+  follow-up sequence, and handle AI-classified replies.
 
 ## The rule that shapes the system
 
@@ -63,18 +64,42 @@ card has an inline email field.
 ```
 app/
   trades/     grid scraper + calling board with the call-logger modal
-  b2b/        campaign switcher + 3-column Kanban + import
+  leads/      B2B lead pool — Apify scraper, filters, add-to-campaign
+  b2b/        campaign switcher + send controls + Kanban + import
   inbox/      AI inbox and reply console
-  api/        routes and the two inbound webhook receivers
+  api/        routes and the three inbound webhook receivers
 lib/
-  n8n.ts        ALL client-facing email
-  resend.ts     ONLY internal alerts (structurally incapable of more)
-  grid.ts       geographic partitioning maths
-  places.ts     Google Places client
-  apify.ts      LinkedIn actor client
-  tps.ts        pluggable TPS/CTPS screening
-  phone.ts      E.164 normalisation — the trades dedupe key
+  n8n.ts          ALL client-facing email
+  resend.ts       ONLY internal alerts (structurally incapable of more)
+  b2b-dispatch.ts the daily send engine — who gets emailed, and when
+  b2b-import.ts   pool writes and campaign enrolment, deliberately separate
+  grid.ts         geographic partitioning maths
+  places.ts       Google Places client
+  apify.ts        Apify actor client
+  apify-actors.ts actor profiles — what the scrape form asks for
+  tps.ts          pluggable TPS/CTPS screening
+  phone.ts        E.164 normalisation — the trades dedupe key
+instrumentation.ts  the once-a-minute ticker that drives daily sends
 ```
+
+## How the daily send limit works
+
+Enrolling a lead does not email it. A lead joins a campaign at stage `queued`
+and only moves on when n8n confirms an email actually left:
+
+```
+queued ──(daily batch claims it)──▶ sending ──(n8n: success)──▶ sent_1
+   ▲                                   │
+   └────(n8n: failed, or 2h silence)───┘
+```
+
+Each day's batch selects **only `queued` leads**, up to the campaign's
+`daily_send_limit`, oldest first. A lead that has been emailed is `sent_1` and
+is invisible to that selection — so with 100 leads at 10/day, days 1, 2 and 3
+send leads 1-10, 11-20 and 21-30, and nobody receives the first email twice.
+
+The app schedules this itself (see `instrumentation.ts`); n8n is the mail
+transport, not the scheduler.
 
 ## Compliance note
 

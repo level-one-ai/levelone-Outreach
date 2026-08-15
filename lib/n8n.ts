@@ -132,29 +132,41 @@ export async function dispatchTradesMeeting(
 }
 
 /* -------------------------------------------------------------------- */
-/*  2. B2B — start the cold sequence                                     */
+/*  2. B2B — send one day's batch                                        */
 /* -------------------------------------------------------------------- */
 
 /**
- * Fired when contacts are enrolled into a campaign. n8n sends the first cold
- * email and schedules the 2-day and 5-day follow-ups with Wait nodes.
+ * Fired by the daily dispatcher with the leads due to be emailed TODAY —
+ * never with a whole import. n8n's job here is transport only: send each
+ * email, then POST the outcome back to `callback_url`.
  *
- * Sent as one batch rather than one call per contact: a 500-lead import would
- * otherwise mean 500 webhook calls, and n8n's own rate limits are the thing
- * that breaks first.
+ * That callback is not optional. Nothing in this app marks a lead as emailed
+ * until n8n says the mail left, which is what stops tomorrow's batch from
+ * re-sending the same first email to someone who already got it.
+ *
+ * Sent as one batch rather than one call per contact: a 50-a-day campaign
+ * would otherwise mean 50 webhook calls, and n8n's own rate limits are the
+ * thing that breaks first.
  */
-export async function dispatchB2BSequence(
+export async function dispatchB2BBatch(
   campaign: B2BCampaign,
-  runs: Array<{ outreach_id: string; contact: B2BContact }>
+  runs: Array<{ outreach_id: string; contact: B2BContact }>,
+  callbackUrl: string
 ): Promise<DispatchResult> {
   return post("b2bSequence", {
-    event: "b2b_sequence_start",
+    event: "b2b_batch_send",
     campaign: {
       campaign_id: campaign.id,
       title: campaign.title,
       offer_description: campaign.offer_description,
       from_email: campaign.from_email,
     },
+    /**
+     * POST `{outreach_id, status:"success"|"failed", subject, body, error}`
+     * here per recipient (or `{results:[…]}` once), with the
+     * x-webhook-secret header.
+     */
+    callback_url: callbackUrl,
     /** Days after the first email that each follow-up should go out. */
     follow_up_schedule: [2, 5],
     recipients: runs.map((r) => ({

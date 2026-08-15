@@ -33,13 +33,24 @@ export async function GET(request: Request) {
     const board = Object.fromEntries(
       BOARD_STAGES.map((stage) => [
         stage,
-        runs.filter((r) => r.kanban_stage === stage),
+        /* `sending` is a claim that normally lasts seconds. Show those cards in
+           Queued rather than giving a near-always-empty column a third of the
+           board — they have not been emailed yet, so that is where they read
+           correctly. */
+        stage === "queued"
+          ? runs.filter(
+              (r) => r.kanban_stage === "queued" || r.kanban_stage === "sending"
+            )
+          : runs.filter((r) => r.kanban_stage === stage),
       ])
     ) as Record<KanbanStage, B2BOutreach[]>;
 
     return ok({
       board,
       replied: runs.filter((r) => r.kanban_stage === "replied"),
+      /* Surfaced as a strip above the board: these need a decision, not a
+         column in the flow. */
+      failed: runs.filter((r) => r.kanban_stage === "send_failed"),
       total: runs.length,
     });
   } catch (err) {
@@ -69,9 +80,19 @@ export async function PATCH(request: Request) {
       .collection(COLLECTIONS.b2bOutreach)
       .update<B2BOutreach>(outreach_id, {
         kanban_stage,
-        // Moving to a follow-up column is a statement that an email just went
-        // out, so keep the timestamp consistent with that.
-        ...(kanban_stage !== "replied"
+        // Moving to a sent/follow-up column is a statement that an email just
+        // went out, so keep the timestamp consistent with that. Moving BACK to
+        // queued is the opposite statement — clear it, and reset the claim so
+        // the next batch can pick this lead up.
+        ...(kanban_stage === "queued"
+          ? {
+              last_email_sent_at: "",
+              dispatched_at: "",
+              queued_at: new Date().toISOString(),
+              send_error: "",
+            }
+          : {}),
+        ...(kanban_stage !== "replied" && kanban_stage !== "queued" && kanban_stage !== "send_failed"
           ? { last_email_sent_at: new Date().toISOString() }
           : {}),
       });

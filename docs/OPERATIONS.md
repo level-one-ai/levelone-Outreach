@@ -142,10 +142,24 @@ Every collection needs its **List, View, Create and Update** API rules set to
 | `linkedin_url` | Text | |
 | `email_verified` | Bool | |
 | `verification_score` | Number | 0–100 |
+| `niche` | Text | Your label for the batch that found them — the pool's filter |
+| `source` | Select | `apify` \| `paste` \| `api` |
+| `scrape_run` | Text | The `scrape_runs` id that produced them |
+| `pool_status` | Select | `new` \| `in_campaign` \| `suppressed` |
 
 ### `b2b_campaigns`
 
-`title` (Text) · `offer_description` (Editor) · `from_email` (Text) · `active` (Bool)
+| Field | Type | Notes |
+| --- | --- | --- |
+| `title` | Text | |
+| `offer_description` | Editor | |
+| `from_email` | Text | |
+| `active` | Bool | |
+| `daily_send_limit` | Number | First emails per day. Default 10 |
+| `send_time` | Text | `"09:00"`, 24-hour |
+| `send_timezone` | Text | IANA zone, e.g. `Europe/London` |
+| `sending_active` | Bool | The Start/Pause switch. **Default false** |
+| `last_dispatch_date` | Text | `"YYYY-MM-DD"` — the once-a-day lock |
 
 ### `b2b_outreach`
 
@@ -153,13 +167,22 @@ Every collection needs its **List, View, Create and Update** API rules set to
 | --- | --- | --- |
 | `contact` | Relation → `b2b_contacts` | single |
 | `campaign` | Relation → `b2b_campaigns` | single |
-| `kanban_stage` | Select | `sent_1` \| `followup_2d` \| `followup_5d` \| `replied` |
+| `kanban_stage` | Select | `queued` \| `sending` \| `sent_1` \| `followup_2d` \| `followup_5d` \| `replied` \| `send_failed` |
 | `reply_sentiment` | Select | `pending` \| `positive` \| `negative` \| `no_reply` |
 | `ai_draft_reply` | Text | |
 | `call_booked` | Bool | default false |
 | `call_booked_at` | Date | |
-| `last_email_sent_at` | Date | |
+| `last_email_sent_at` | Date | **Empty until n8n confirms the send** |
 | `archived` | Bool | default false |
+| `send_attempts` | Number | 3 failures parks the lead |
+| `queued_at` | Date | FIFO ordering for the daily batch |
+| `dispatched_at` | Date | When it went to n8n; drives the stale sweep |
+| `send_error` | Text | |
+
+The three stages that matter for the send limit are `queued` (never emailed),
+`sending` (handed to n8n, unconfirmed) and `sent_1` (confirmed). Only `queued`
+is ever selected for a batch — that is the no-double-send guarantee, and it is
+enforced by the stage value, not by any counter.
 
 Add a **composite UNIQUE index on `(contact, campaign)`**. This is what stops a
 re-import double-enrolling someone, while still allowing the same contact in a
@@ -257,18 +280,40 @@ If step 1 fails you get the reason on screen and nothing is marked sent.
 
 ## 5. Operations: the B2B pipeline, event by event
 
+The B2B side is three separate stages, and keeping them separate is the point:
+**scrape into a pool → put pooled leads in a campaign's queue → the app sends
+that queue at a fixed pace.** Nothing skips a stage; in particular, no import
+and no scrape ever sends an email.
+
+### 5.0 You scrape a niche (`/leads`)
+
+**You do:** pick a scraper, name the niche, fill in its fields, Start.
+
+**System does:** starts the Apify actor, polls it to completion inside this app
+(not in n8n), pulls the dataset, normalises it, verifies the addresses and
+writes contacts to the **lead pool** tagged with your niche. No campaign is
+touched and nobody is enrolled.
+
+Results with no email address are dropped — an address is the whole point of a
+cold-email lead. If an actor returns results but *none* carry an email, the run
+is marked failed and says so, because a silently empty pool looks identical to
+a broken scrape.
+
 ### 5.1 You create a campaign
 
-Title, offer description, and the address it sends from. A campaign is **one
-offer from one sender**. Contacts are stored separately — which is what lets you
-re-target a lead from six months ago with a new offer without duplicating their
-contact record.
+Title, offer description, the address it sends from, and its **pace**: emails
+per day, the time of day they leave, and the timezone that time is read in. A
+campaign is **one offer from one sender at one pace**. Contacts are stored
+separately — which is what lets you re-target a lead from six months ago with a
+new offer without duplicating their contact record.
 
-### 5.2 Contacts enter a campaign
+A new campaign is created **paused**. Sending starts when you press Start.
+
+### 5.2 Contacts enter a campaign's QUEUE
 
 Two doors, one pipeline:
 
-- **Apify scrape** (B2B → the actor runs inside this app, polled to completion)
+- **From the pool** (`/leads` → select → *Add to campaign*) — the normal path
 - **Paste import** (B2B → *Import*, CSV or TSV with a header row)
 
 **System does:**
@@ -279,20 +324,49 @@ Two doors, one pipeline:
    the domain accepts everything so the address is unproven.
 3. **Contact**: reuse if the email already exists (filling only blank fields —
    a later scrape never erases a good company name), otherwise create.
-4. **Enrol**: create a `b2b_outreach` row at stage `sent_1`. Already in this
-   campaign → skipped. **Re-importing the same list is safe and never
-   double-emails anyone.**
-5. **n8n** → `N8N_WEBHOOK_B2B_SEQUENCE` with the whole batch in one call.
+4. **Enrol**: create a `b2b_outreach` row at stage **`queued`**, with
+   `last_email_sent_at` empty. Already in this campaign → skipped.
+   **Re-importing the same list is safe and never double-emails anyone.**
 
-**You see:** `X enrolled · Y existing contacts reused · Z already in campaign ·
-N rejected`. If enrolment succeeded but the webhook failed, that is reported as
-a **separate error toast** — enrolled-but-not-emailed is the one outcome that
-looks like success and is not.
+**Nothing is emailed here.** Tip 500 leads into a campaign that sends 10 a day
+and exactly 10 go out at the next send time.
+
+**You see:** `X queued · Y existing contacts reused · Z already in campaign ·
+N rejected`, followed by how long that will take at the campaign's pace.
+
+### 5.2b The daily batch goes out
+
+A ticker inside the app (`instrumentation.ts`) wakes every minute and asks each
+active campaign whether it is due. When it is:
+
+1. **Sweep** — anything stuck in `sending` for over 2 hours (n8n never
+   confirmed it) goes back to `queued`.
+2. **Claim the day** — `last_dispatch_date` is written *before* sending. The
+   ticker fires 1440 times a day; this field is what makes "once a day" true.
+3. **Take the front of the queue** — up to `daily_send_limit` runs at stage
+   `queued`, oldest first.
+4. **Claim each lead** — flip to `sending`, so a second tick cannot take the
+   same leads.
+5. **Send** — one webhook call to n8n with just that batch.
+6. **Confirm** — n8n POSTs each result to `/api/webhooks/email-sent`; success
+   moves the lead to `sent_1` and stamps `last_email_sent_at`.
+
+**Why a lead never gets the same first email twice:** selection only ever looks
+at `queued`. A lead that has been emailed is `sent_1`, which is invisible to
+selection; a lead mid-flight is `sending`, also invisible. The only way back to
+`queued` is a reported failure or the stale sweep — both of which mean the
+email genuinely did not arrive.
+
+*"Send next batch"* on the board runs the same code with the clock and the day
+lock bypassed. It still honours the daily limit and still only takes `queued`
+leads, so pressing it twice sends one batch and then finds nothing to do.
 
 ### 5.3 The sequence runs
 
-n8n owns the timers. Cards move `sent_1` → `followup_2d` (day 2) →
-`followup_5d` (day 5) as each email actually goes out.
+n8n owns the follow-up timers. Cards move `sent_1` → `followup_2d` (day 2) →
+`followup_5d` (day 5) as each email actually goes out. Follow-ups are **not**
+counted against the daily limit — that limit governs first emails, which are
+the ones that grow the campaign.
 
 ### 5.4 A client replies — the auto-pause
 
@@ -436,12 +510,13 @@ Fired when you send a meeting email to a positive trades lead.
 
 ### 7.2 `N8N_WEBHOOK_B2B_SEQUENCE`
 
-Fired when contacts are enrolled. **One call for the whole batch** — a 500-lead
-import as 500 webhook calls is what breaks n8n's own rate limits first.
+Fired **once a day with that day's batch**, not on enrolment. **One call for
+the whole batch** — 10 recipients as 10 webhook calls is what breaks n8n's own
+rate limits first.
 
 ```json
 {
-  "event": "b2b_sequence_start",
+  "event": "b2b_batch_send",
   "sent_at": "2026-08-13T14:30:11.882Z",
   "campaign": {
     "campaign_id": "k9j8h7g6f5d4s3a",
@@ -449,6 +524,7 @@ import as 500 webhook calls is what breaks n8n's own rate limits first.
     "offer_description": "We build automated lead systems for UK agencies…",
     "from_email": "dean@levelone.digital"
   },
+  "callback_url": "https://your-domain/api/webhooks/email-sent",
   "follow_up_schedule": [2, 5],
   "recipients": [
     {
@@ -464,12 +540,25 @@ import as 500 webhook calls is what breaks n8n's own rate limits first.
 }
 ```
 
-`follow_up_schedule` is days after the first email.
+`follow_up_schedule` is days after the first email. `recipients` holds only
+today's batch — its length is the campaign's `daily_send_limit`, or whatever is
+left in the queue.
 
-**Your workflow must:** send the first email, then Wait 2 days → re-check
-`kanban_stage` in PocketBase → if not `replied`, send follow-up 1 and set stage
-`followup_2d`. Repeat at day 5 for `followup_5d`. **The stage re-check is the
-auto-pause** — without it, a client who replied still gets follow-ups.
+**Your workflow must:**
+
+1. Send the first email.
+2. **POST the outcome to `callback_url`** with the `x-webhook-secret` header
+   (see §8.3). This is not optional — the app does not mark a lead as emailed
+   until this arrives, and that is what stops tomorrow's batch re-sending to
+   the same person.
+3. Wait 2 days → re-check `kanban_stage` in PocketBase → if not `replied`, send
+   follow-up 1 and set stage `followup_2d`. Repeat at day 5 for `followup_5d`.
+   **The stage re-check is the auto-pause** — without it, a client who replied
+   still gets follow-ups.
+
+Note the split: n8n sets the stage itself for *follow-ups*, but the *first*
+email's stage transition happens through the callback, because that one is what
+the send limit counts.
 
 ### 7.3 `N8N_WEBHOOK_DISPATCH_RESPONSE`
 
@@ -636,6 +725,57 @@ One of `outreach_id` or `contact_email` is required; the rest are optional.
 `"matched": false` means the booking came from someone with no outreach run —
 still alerted, nothing updated.
 
+### 8.3 `POST /api/webhooks/email-sent`
+
+**The most important callback in the system.** n8n reports that a first email
+has actually gone out (or failed). Until this arrives the lead sits at stage
+`sending` and is counted as not-yet-emailed.
+
+Post one result per recipient:
+
+```json
+{
+  "outreach_id": "o1u2t3r4e5a6c7h",
+  "status": "success",
+  "subject": "Quick question about Acme's lead flow",
+  "body": "Hi Jane, …",
+  "sent_at": "2026-08-16T08:00:04.113Z"
+}
+```
+
+…or the whole batch at once, as `{"results": [ … ]}` or a plain JSON array.
+
+On failure, report it — do not stay silent:
+
+```json
+{
+  "outreach_id": "o1u2t3r4e5a6c7h",
+  "status": "failed",
+  "error": "SMTP 550 mailbox unavailable"
+}
+```
+
+**What each outcome does:**
+
+| `status` | Effect |
+|---|---|
+| `success` | Stage → `sent_1`, `last_email_sent_at` stamped, an outbound `messages` row logged for the Inbox thread |
+| `failed` | `send_attempts` + 1, stage → `queued` to retry another day; after 3 attempts → `send_failed`, plus an internal alert |
+| *(never sent)* | Lead stays `sending` until the 2-hour stale sweep returns it to `queued` — it works, but costs that lead a day |
+
+**Reply:**
+
+```json
+{ "ok": true, "confirmed": 10, "failed": 0, "ignored": 0, "errors": [] }
+```
+
+`ignored` counts results for leads that were not at stage `sending` — an
+already-applied duplicate, or a lead that has since replied. This is deliberate
+and safe: **the endpoint is idempotent**, so retrying a callback never
+double-counts and never drags a replied lead backwards. A 502 means PocketBase
+was unreachable and n8n *should* retry; a 200 means the result was recorded or
+knowingly ignored.
+
 ---
 
 ## 9. Deployment
@@ -650,6 +790,15 @@ Standard Next.js 15. On Coolify:
 5. Open `/api/health` and confirm all six collections report `ok`.
 6. Point your n8n workflows' callbacks at `https://<your-domain>/api/webhooks/…`
    with the shared secret header.
+7. **Set `APP_BASE_URL`.** The daily dispatcher refuses to send without it —
+   it is the callback address n8n needs to confirm a send, and without a
+   confirmation every lead would strand mid-flight.
+8. Leave `DISPATCH_TICKER_ENABLED` unset. The send scheduler is an interval
+   inside the Node process, so it needs the long-lived server Coolify gives
+   you. On a **second replica**, set it to `false` — one ticker is enough.
+   On a serverless host there is no persistent process at all: set it `false`
+   and POST `{"campaign_id":"…"}` to `/api/b2b/dispatch` from a platform cron
+   instead.
 
 ### Post-deploy smoke test
 

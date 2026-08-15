@@ -1,6 +1,5 @@
 import { fail, ok, parseBody } from "@/lib/api";
 import { importB2BContacts } from "@/lib/b2b-import";
-import { dispatchB2BSequence } from "@/lib/n8n";
 import {
   COLLECTIONS,
   createPublicClient,
@@ -14,10 +13,13 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 /**
- * Imports B2B contacts into a campaign and starts their sequence.
+ * Pastes B2B contacts straight into a campaign's QUEUE.
  *
- * Verification, contact deduplication and campaign enrolment all happen in
- * lib/b2b-import.ts; this route's own job is the n8n hand-off afterwards.
+ * This route no longer sends anything. It used to hand the whole batch to n8n
+ * the moment the import finished, which meant importing 500 leads emailed 500
+ * people at once — and marked them all "sent" before n8n had confirmed a
+ * single message. Contacts now land in `queued` and leave at the campaign's
+ * chosen daily pace, under lib/b2b-dispatch.ts.
  *
  * Note what is NOT enrolled: contacts already in this campaign. Re-importing
  * the same list is therefore safe and will not double-email anyone — a
@@ -28,7 +30,7 @@ export async function POST(request: Request) {
   const parsed = await parseBody(request, b2bImportSchema);
   if (!parsed.success) return parsed.response;
 
-  const { campaign_id, contacts, allow_unverified, start_sequence } = parsed.data;
+  const { campaign_id, contacts, allow_unverified } = parsed.data;
   const pb = createPublicClient();
 
   let campaign: B2BCampaign;
@@ -47,6 +49,7 @@ export async function POST(request: Request) {
   try {
     result = await importB2BContacts(pb, campaign_id, contacts, {
       allowUnverified: allow_unverified,
+      meta: { source: "paste" },
     });
   } catch (err) {
     const reason = describePocketBaseError(err, COLLECTIONS.b2bContacts);
@@ -54,26 +57,13 @@ export async function POST(request: Request) {
     return fail(reason, 502);
   }
 
-  /* Hand the whole batch to n8n in one call. The sequence webhook sends the
-     first cold email and schedules the 2-day and 5-day follow-ups. */
-  let sequence: { started: boolean; error?: string } = { started: false };
-  if (start_sequence && result.enrolled.length > 0) {
-    const dispatch = await dispatchB2BSequence(campaign, result.enrolled);
-    sequence = dispatch.ok
-      ? { started: true }
-      : { started: false, error: dispatch.error };
-
-    if (!dispatch.ok) {
-      /* The contacts ARE enrolled and sitting in the "First Email Sent"
-         column, but nothing has actually been emailed. Say so plainly rather
-         than reporting a clean import. */
-      console.error("[b2b/import] enrolled but sequence not started:", dispatch.error);
-    }
-  }
-
   return ok({
     summary: result.summary,
-    sequence,
+    /* What happens next, in the response, so the UI never has to imply that
+       an import means an email. */
+    queued: result.summary.enrolled,
+    daily_send_limit: campaign.daily_send_limit || 10,
+    sending_active: Boolean(campaign.sending_active),
     verification: isVerifierConfigured()
       ? "active"
       : "disabled — contacts imported as UNVERIFIED (set EMAIL_VERIFIER_PROVIDER to enable)",

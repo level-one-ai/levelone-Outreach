@@ -7,12 +7,13 @@ import { BOARD_STAGES, STAGE_LABELS } from "@/lib/types";
 import type { B2BContact, B2BOutreach, KanbanStage } from "@/lib/types";
 
 /**
- * The three-column sequence tracker.
+ * The sequence tracker.
  *
- * Columns are timeline positions, not statuses you drag between: n8n moves a
- * card along as each follow-up actually goes out. A card that disappears from
- * the board has replied — that is the auto-pause made visible, and it is now
- * in the AI Inbox.
+ * Columns are timeline positions, not statuses you drag between. Leads start
+ * in Queued — enrolled but not emailed — and only move to First Email Sent
+ * when n8n confirms the mail actually left. After that n8n moves a card along
+ * as each follow-up goes out. A card that disappears from the board has
+ * replied: that is the auto-pause made visible, and it is now in the AI Inbox.
  */
 
 function KanbanCard({ run }: { run: B2BOutreach }) {
@@ -67,11 +68,15 @@ function KanbanCard({ run }: { run: B2BOutreach }) {
         )}
       </div>
 
-      {run.last_email_sent_at && (
+      {run.kanban_stage === "sending" ? (
+        <p className="mt-2 text-[0.68rem] uppercase tracking-wider text-pending">
+          Sending — waiting on n8n
+        </p>
+      ) : run.last_email_sent_at ? (
         <p className="mt-2 text-[0.68rem] uppercase tracking-wider text-muted">
           Last sent {formatDate(run.last_email_sent_at)}
         </p>
-      )}
+      ) : null}
     </motion.article>
   );
 }
@@ -82,7 +87,7 @@ export default function KanbanBoard({
   board: Record<KanbanStage, B2BOutreach[]>;
 }) {
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
       {BOARD_STAGES.map((stage, i) => {
         const runs = board[stage] ?? [];
         return (

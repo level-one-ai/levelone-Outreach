@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Inbox, LayoutGrid, PhoneCall } from "lucide-react";
+import { Inbox, LayoutGrid, PhoneCall, Users } from "lucide-react";
 
 import { usePageTransition } from "@/components/PageTransition";
 
@@ -14,6 +14,7 @@ import { usePageTransition } from "@/components/PageTransition";
 
 const MODULES = [
   { href: "/trades", label: "Trades", Icon: PhoneCall },
+  { href: "/leads", label: "Leads", Icon: Users },
   { href: "/b2b", label: "B2B", Icon: LayoutGrid },
   { href: "/inbox", label: "Inbox", Icon: Inbox },
 ] as const;

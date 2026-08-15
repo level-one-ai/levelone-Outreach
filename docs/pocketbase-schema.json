@@ -56,7 +56,25 @@
       { "name": "website", "type": "text" },
       { "name": "linkedin_url", "type": "text" },
       { "name": "email_verified", "type": "bool" },
-      { "name": "verification_score", "type": "number" }
+      { "name": "verification_score", "type": "number" },
+      { "name": "niche", "type": "text" },
+      {
+        "name": "source",
+        "type": "select",
+        "options": {
+          "maxSelect": 1,
+          "values": ["apify", "paste", "api"]
+        }
+      },
+      { "name": "scrape_run", "type": "text" },
+      {
+        "name": "pool_status",
+        "type": "select",
+        "options": {
+          "maxSelect": 1,
+          "values": ["new", "in_campaign", "suppressed"]
+        }
+      }
     ],
     "indexes": [
       "CREATE UNIQUE INDEX `idx_b2b_contact_email` ON `b2b_contacts` (`email`)"
@@ -74,7 +92,12 @@
       { "name": "title", "type": "text", "required": true },
       { "name": "offer_description", "type": "editor" },
       { "name": "from_email", "type": "text", "required": true },
-      { "name": "active", "type": "bool" }
+      { "name": "active", "type": "bool" },
+      { "name": "daily_send_limit", "type": "number" },
+      { "name": "send_time", "type": "text" },
+      { "name": "send_timezone", "type": "text" },
+      { "name": "sending_active", "type": "bool" },
+      { "name": "last_dispatch_date", "type": "text" }
     ],
     "indexes": []
   },
@@ -105,7 +128,15 @@
         "required": true,
         "options": {
           "maxSelect": 1,
-          "values": ["sent_1", "followup_2d", "followup_5d", "replied"]
+          "values": [
+            "queued",
+            "sending",
+            "sent_1",
+            "followup_2d",
+            "followup_5d",
+            "replied",
+            "send_failed"
+          ]
         }
       },
       {
@@ -120,7 +151,11 @@
       { "name": "call_booked", "type": "bool" },
       { "name": "call_booked_at", "type": "date" },
       { "name": "last_email_sent_at", "type": "date" },
-      { "name": "archived", "type": "bool" }
+      { "name": "archived", "type": "bool" },
+      { "name": "send_attempts", "type": "number" },
+      { "name": "queued_at", "type": "date" },
+      { "name": "dispatched_at", "type": "date" },
+      { "name": "send_error", "type": "text" }
     ],
     "indexes": [
       "CREATE UNIQUE INDEX `idx_outreach_contact_campaign` ON `b2b_outreach` (`contact`, `campaign`)"

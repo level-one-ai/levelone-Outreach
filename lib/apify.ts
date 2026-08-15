@@ -75,15 +75,30 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
  * minutes, far longer than an HTTP request should be held open. The caller
  * records the run id and polls.
  */
-export async function startRun(input: Record<string, unknown>): Promise<ApifyRun> {
-  if (!isApifyConfigured()) {
+export async function startRun(
+  input: Record<string, unknown>,
+  /** Overrides APIFY_LINKEDIN_ACTOR_ID, so one deployment can drive several
+   *  actors — a Sales Navigator scraper and a company scraper, say. */
+  actorId?: string
+): Promise<ApifyRun> {
+  const actor = actorId || ACTOR_ID;
+
+  if (!TOKEN) {
+    throw new ApifyError("APIFY_TOKEN is not configured.");
+  }
+  if (!actor) {
     throw new ApifyError(
-      "APIFY_TOKEN and APIFY_LINKEDIN_ACTOR_ID must both be configured."
+      "No Apify actor configured — set APIFY_LINKEDIN_ACTOR_ID or pass an actor id."
     );
   }
 
+  /* Apify's REST path wants `user~actor`, but every actor URL and most docs
+     show `user/actor`. Accept both rather than failing with a 404 that gives
+     no hint which of the two you got wrong. */
+  const normalised = actor.replace("/", "~");
+
   const body = await apiFetch<{ data: ApifyRun }>(
-    `/acts/${encodeURIComponent(ACTOR_ID)}/runs?timeout=${RUN_TIMEOUT_SECONDS}`,
+    `/acts/${encodeURIComponent(normalised)}/runs?timeout=${RUN_TIMEOUT_SECONDS}`,
     { method: "POST", body: JSON.stringify(input) }
   );
   return body.data;
