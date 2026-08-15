@@ -2,13 +2,13 @@ import {
   ApifyError,
   fetchDataset,
   getRun,
-  isApifyConfigured,
   isTerminal,
   normalizeDataset,
   startRun,
 } from "@/lib/apify";
+import { findProfile, listProfilesForClient, resolveActorId } from "@/lib/apify-actors";
 import { fail, ok, parseBody } from "@/lib/api";
-import { importB2BContacts } from "@/lib/b2b-import";
+import { importB2BLeads } from "@/lib/b2b-import";
 import {
   completeRun,
   createRun,
@@ -16,7 +16,6 @@ import {
   failRun,
   runDetached,
 } from "@/lib/jobs";
-import { dispatchB2BSequence } from "@/lib/n8n";
 import {
   COLLECTIONS,
   createPublicClient,
@@ -24,7 +23,7 @@ import {
 } from "@/lib/pocketbase";
 import { sendInternalAlert } from "@/lib/resend";
 import { b2bScrapeSchema } from "@/lib/schema";
-import type { B2BCampaign, ScrapeRun } from "@/lib/types";
+import type { ScrapeRun } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -33,7 +32,11 @@ const POLL_INTERVAL_MS = 5_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Runs an Apify LinkedIn scrape and imports the results into a campaign.
+ * Runs an Apify scrape and drops the results into the B2B LEAD POOL.
+ *
+ * Deliberately campaign-free. Scraping and campaigning are separate jobs: you
+ * fill the pool here, browse it on /leads, and decide later who goes into
+ * which campaign. Nothing on this path enrols anyone or sends an email.
  *
  * Scraping happens inside this app, not in n8n. The actor run itself takes
  * minutes, so this follows the same pattern as the trades grid scrape: create
@@ -41,38 +44,50 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * UI polls.
  *
  * `cells_total`/`cells_done` are reused as a two-phase progress signal here
- * (1 = actor finished, 2 = import finished) so one progress panel component
- * serves both scrapers.
+ * (1 = actor finished, 2 = pool write finished) so one progress panel
+ * component serves both scrapers.
  */
 export async function POST(request: Request) {
-  if (!isApifyConfigured()) {
-    return fail(
-      "APIFY_TOKEN and APIFY_LINKEDIN_ACTOR_ID must both be configured.",
-      503
-    );
+  if (!process.env.APIFY_TOKEN) {
+    return fail("APIFY_TOKEN is not configured.", 503);
   }
 
   const parsed = await parseBody(request, b2bScrapeSchema);
   if (!parsed.success) return parsed.response;
-  const { campaign_id, actor_input } = parsed.data;
+  const { actor_profile, form_values, niche, allow_unverified } = parsed.data;
 
-  const pb = createPublicClient();
+  const profile = findProfile(actor_profile);
+  if (!profile) {
+    return fail(`Unknown actor profile "${actor_profile}".`, 400);
+  }
 
-  let campaign: B2BCampaign;
-  try {
-    campaign = await pb
-      .collection(COLLECTIONS.b2bCampaigns)
-      .getOne<B2BCampaign>(campaign_id);
-  } catch (err) {
+  const actorId = resolveActorId(profile, form_values);
+  if (!actorId) {
     return fail(
-      `Campaign not found. ${describePocketBaseError(err, COLLECTIONS.b2bCampaigns)}`,
-      404
+      "No Apify actor to run — set APIFY_LINKEDIN_ACTOR_ID, or supply an actor id.",
+      503
     );
   }
 
+  /* buildInput throws on malformed custom JSON. Catching it here means the
+     user gets a 400 they can fix, rather than a run that fails minutes later. */
+  let actorInput: Record<string, unknown>;
+  try {
+    actorInput = profile.buildInput(form_values);
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : "Invalid actor input.", 400);
+  }
+
+  const pb = createPublicClient();
+
   let run: ScrapeRun;
   try {
-    run = await createRun(pb, "b2b", { campaign_id, actor_input }, 2);
+    run = await createRun(
+      pb,
+      "b2b",
+      { actor_profile, actor_id: actorId, niche, form_values },
+      2
+    );
   } catch (err) {
     return fail(
       `Could not start the scrape. ${describePocketBaseError(err, COLLECTIONS.scrapeRuns)}`,
@@ -83,7 +98,7 @@ export async function POST(request: Request) {
   runDetached(pb, run.id, async () => {
     try {
       // ---- Phase 1: run the actor ---------------------------------
-      const started = await startRun(actor_input);
+      const started = await startRun(actorInput, actorId);
 
       let status = started.status;
       const deadline =
@@ -106,56 +121,72 @@ export async function POST(request: Request) {
 
       await bumpProgress(pb, run.id, { cellsDone: 1, found: items.length });
 
+      /* Results with no email are dropped by normalizeDataset. A run that
+         found plenty but normalised to nothing means the actor does not
+         return addresses — worth saying plainly, because the alternative is
+         staring at an empty pool wondering what broke. */
       if (scraped.length === 0) {
+        if (items.length > 0) {
+          await failRun(
+            pb,
+            run.id,
+            new Error(
+              `The actor returned ${items.length} results, but none had an email address. ` +
+                "Check the actor's output fields — this actor may not provide emails."
+            )
+          );
+          return;
+        }
         await completeRun(pb, run.id);
         return;
       }
 
-      // ---- Phase 2: verify, dedupe, enrol -------------------------
-      const result = await importB2BContacts(pb, campaign_id, scraped);
+      // ---- Phase 2: verify, dedupe, write to the pool --------------
+      const result = await importB2BLeads(
+        pb,
+        scraped,
+        { niche, source: "apify", scrape_run: run.id },
+        { allowUnverified: allow_unverified }
+      );
 
       await bumpProgress(pb, run.id, {
         cellsDone: 1,
-        imported: result.summary.enrolled,
-        duplicates: result.summary.alreadyInCampaign,
+        imported: result.summary.contactsCreated,
+        duplicates: result.summary.contactsReused,
         blocked: result.summary.rejected,
       });
-
-      // ---- Phase 3: hand the batch to n8n -------------------------
-      if (result.enrolled.length > 0) {
-        const dispatch = await dispatchB2BSequence(campaign, result.enrolled);
-        if (!dispatch.ok) {
-          await sendInternalAlert("system_error", {
-            subject: `Sequence not started — ${campaign.title}`,
-            summary: `${result.enrolled.length} contacts were enrolled from an Apify scrape, but the n8n sequence webhook failed. Nothing has been emailed.`,
-            facts: { Reason: dispatch.error ?? "unknown", Campaign: campaign.title },
-            link: "/b2b",
-            linkLabel: "Open B2B board",
-          });
-        }
-      }
 
       await completeRun(pb, run.id);
     } catch (err) {
       const reason = err instanceof Error ? err.message : "unknown error";
       await failRun(pb, run.id, err);
       await sendInternalAlert("system_error", {
-        subject: `B2B scrape failed — ${campaign.title}`,
-        summary: "The Apify LinkedIn scrape did not complete.",
-        facts: { Reason: reason, Campaign: campaign.title },
-        link: "/b2b",
-        linkLabel: "Open B2B board",
+        subject: `B2B scrape failed — ${niche || "untitled"}`,
+        summary: "The Apify scrape did not complete. No leads were added to the pool.",
+        facts: { Reason: reason, Niche: niche || "—", Actor: actorId },
+        link: "/leads",
+        linkLabel: "Open lead pool",
       });
     }
   });
 
-  return ok({ run_id: run.id });
+  return ok({ run_id: run.id, actor_id: actorId });
 }
 
-/** Progress for the UI's polling loop. */
+/**
+ * Progress for the UI's polling loop, and the actor-profile catalogue the
+ * scrape form renders itself from.
+ */
 export async function GET(request: Request) {
   const runId = new URL(request.url).searchParams.get("run_id");
-  if (!runId) return fail("run_id is required.");
+
+  if (!runId) {
+    return ok({
+      profiles: listProfilesForClient(),
+      configured: Boolean(process.env.APIFY_TOKEN),
+      default_actor: process.env.APIFY_LINKEDIN_ACTOR_ID ?? "",
+    });
+  }
 
   try {
     const pb = createPublicClient();

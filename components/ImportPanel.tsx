@@ -113,7 +113,6 @@ export default function ImportPanel({
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const [allowUnverified, setAllowUnverified] = useState(false);
-  const [startSequence, setStartSequence] = useState(true);
   const [busy, setBusy] = useState(false);
 
   const parsed = parseContacts(text);
@@ -133,7 +132,6 @@ export default function ImportPanel({
           campaign_id: campaignId,
           contacts: parsed,
           allow_unverified: allowUnverified,
-          start_sequence: startSequence,
         }),
       });
       const body = await res.json();
@@ -146,15 +144,17 @@ export default function ImportPanel({
       const s = body.summary;
       toast(
         "success",
-        `${s.enrolled} enrolled · ${s.contactsReused} existing contacts reused · ${s.alreadyInCampaign} already in this campaign · ${s.rejected} rejected.`
+        `${s.enrolled} queued · ${s.contactsReused} existing contacts reused · ${s.alreadyInCampaign} already in this campaign · ${s.rejected} rejected.`
       );
 
-      /* Enrolled but not emailed is the one outcome that looks like success
-         and is not. Say it separately so it is not lost in the summary. */
-      if (startSequence && body.sequence?.started === false && s.enrolled > 0) {
+      /* An import is not a send any more. Saying what happens next stops the
+         old reading of this toast — that these people have just been emailed. */
+      if (s.enrolled > 0) {
         toast(
-          "error",
-          `Contacts were enrolled but n8n did not start the sequence — nothing has been emailed. ${body.sequence.error ?? ""}`
+          "info",
+          body.sending_active
+            ? `They will go out ${body.daily_send_limit} a day, oldest first.`
+            : `Sending is paused — press Start on the campaign to begin, ${body.daily_send_limit} a day.`
         );
       }
 
@@ -179,7 +179,7 @@ export default function ImportPanel({
         open={open}
         onClose={() => setOpen(false)}
         title="Import contacts"
-        description={`Into "${campaignTitle}". Paste CSV or TSV with a header row.`}
+        description={`Into "${campaignTitle}"'s queue. Paste CSV or TSV with a header row. Nothing is emailed on import — contacts leave at the campaign's daily pace.`}
         width="max-w-2xl"
       >
         <div className="flex flex-col gap-4">
@@ -200,22 +200,6 @@ export default function ImportPanel({
               ? `${parsed.length} contact${parsed.length === 1 ? "" : "s"} detected.`
               : "Recognised columns: email (required), name, company, website, linkedin."}
           </p>
-
-          <label className="flex items-start gap-2.5 text-fluid-sm text-foreground">
-            <input
-              type="checkbox"
-              checked={startSequence}
-              onChange={(e) => setStartSequence(e.target.checked)}
-              className="mt-1"
-            />
-            <span>
-              Start the n8n sequence immediately
-              <span className="block text-fluid-xs text-muted">
-                Sends the first cold email and schedules the 2-day and 5-day
-                follow-ups.
-              </span>
-            </span>
-          </label>
 
           <label className="flex items-start gap-2.5 text-fluid-sm text-foreground">
             <input

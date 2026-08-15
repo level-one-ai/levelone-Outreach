@@ -7,6 +7,7 @@ import HeaderBar from "@/components/HeaderBar";
 import ImportPanel from "@/components/ImportPanel";
 import KanbanBoard from "@/components/KanbanBoard";
 import PageTransition from "@/components/PageTransition";
+import SendControls from "@/components/SendControls";
 import Modal from "@/components/ui/Modal";
 import { EmptyState, ErrorState, SkeletonGrid } from "@/components/ui/States";
 import { ToastProvider, useToast } from "@/components/ui/Toast";
@@ -15,10 +16,13 @@ import type { B2BCampaign, B2BOutreach, KanbanStage } from "@/lib/types";
 type LoadState = "loading" | "ready" | "error";
 
 const EMPTY_BOARD = {
+  queued: [],
+  sending: [],
   sent_1: [],
   followup_2d: [],
   followup_5d: [],
   replied: [],
+  send_failed: [],
 } as Record<KanbanStage, B2BOutreach[]>;
 
 function CampaignDialog({
@@ -34,9 +38,18 @@ function CampaignDialog({
   const [title, setTitle] = useState("");
   const [offer, setOffer] = useState("");
   const [fromEmail, setFromEmail] = useState("");
+  const [limit, setLimit] = useState("10");
+  const [sendTime, setSendTime] = useState("09:00");
+  const [zone, setZone] = useState("Europe/London");
   const [busy, setBusy] = useState(false);
 
   async function submit() {
+    const parsedLimit = Number(limit);
+    if (!Number.isFinite(parsedLimit) || parsedLimit < 1) {
+      toast("error", "Daily limit must be at least 1.");
+      return;
+    }
+
     setBusy(true);
     try {
       const res = await fetch("/api/b2b/campaigns", {
@@ -47,6 +60,13 @@ function CampaignDialog({
           offer_description: offer,
           from_email: fromEmail,
           active: true,
+          daily_send_limit: Math.floor(parsedLimit),
+          send_time: sendTime,
+          send_timezone: zone,
+          /* Deliberately off. A new campaign has nothing in it yet, and a
+             campaign that starts sending the moment it is created is how you
+             email a list you have not finished checking. */
+          sending_active: false,
         }),
       });
       const body = await res.json();
@@ -108,6 +128,45 @@ function CampaignDialog({
           />
         </label>
 
+        <div className="grid grid-cols-3 gap-3">
+          <label>
+            <span className="field-label">Per day</span>
+            <input
+              type="number"
+              min={1}
+              max={200}
+              value={limit}
+              onChange={(e) => setLimit(e.target.value)}
+              className="field-input"
+            />
+          </label>
+
+          <label>
+            <span className="field-label">Send at</span>
+            <input
+              type="time"
+              value={sendTime}
+              onChange={(e) => setSendTime(e.target.value)}
+              className="field-input"
+            />
+          </label>
+
+          <label>
+            <span className="field-label">Timezone</span>
+            <input
+              value={zone}
+              onChange={(e) => setZone(e.target.value)}
+              className="field-input"
+            />
+          </label>
+        </div>
+
+        <p className="text-fluid-xs leading-relaxed text-muted">
+          Leads added to this campaign wait in a queue. This many first emails
+          leave each day at the time above, and no lead is ever sent the first
+          email twice. Sending stays paused until you press Start.
+        </p>
+
         <button
           onClick={submit}
           disabled={busy || !title.trim() || !fromEmail.trim()}
@@ -128,6 +187,7 @@ function B2BWorkspace() {
   const [activeId, setActiveId] = useState<string>("");
   const [board, setBoard] = useState(EMPTY_BOARD);
   const [repliedCount, setRepliedCount] = useState(0);
+  const [failedCount, setFailedCount] = useState(0);
   const [creating, setCreating] = useState(false);
 
   // Campaigns first — the board is meaningless without one selected.
@@ -163,6 +223,7 @@ function B2BWorkspace() {
         }
         setBoard({ ...EMPTY_BOARD, ...body.board });
         setRepliedCount(body.replied?.length ?? 0);
+        setFailedCount(body.failed?.length ?? 0);
       } catch {
         toast("error", "Could not reach the server.");
       }
@@ -188,7 +249,7 @@ function B2BWorkspace() {
               <p className="mt-0.5 text-fluid-xs text-muted">
                 {repliedCount > 0
                   ? `${repliedCount} lead${repliedCount === 1 ? " has" : "s have"} replied and moved to the AI Inbox.`
-                  : "Contacts move along the board as each follow-up goes out. A reply stops the sequence."}
+                  : "Leads wait in Queued until their turn in the daily batch. A reply stops the sequence."}
               </p>
             </div>
 
@@ -250,11 +311,31 @@ function B2BWorkspace() {
               </div>
 
               {active && (
-                <p className="mb-4 text-fluid-xs text-muted">
-                  Sending from{" "}
-                  <span className="font-medium text-foreground">
-                    {active.from_email}
-                  </span>
+                <>
+                  <p className="mb-3 text-fluid-xs text-muted">
+                    Sending from{" "}
+                    <span className="font-medium text-foreground">
+                      {active.from_email}
+                    </span>
+                  </p>
+
+                  <SendControls
+                    campaign={active}
+                    onChanged={(updated) => {
+                      setCampaigns((prev) =>
+                        prev.map((c) => (c.id === updated.id ? updated : c))
+                      );
+                      void loadBoard(updated.id);
+                    }}
+                  />
+                </>
+              )}
+
+              {failedCount > 0 && (
+                <p className="mb-4 rounded-2xl border border-negative/30 px-4 py-3 text-fluid-xs text-negative">
+                  {failedCount} lead{failedCount === 1 ? "" : "s"} could not be
+                  emailed after three attempts. They are out of the queue —
+                  check the sending address and n8n&apos;s logs.
                 </p>
               )}
 

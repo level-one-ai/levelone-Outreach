@@ -28,13 +28,26 @@ printing "null" into the email.
 
 **Trigger:** Webhook, POST → `N8N_WEBHOOK_B2B_SEQUENCE`.
 
-Receives the **whole batch** in one call: `campaign` plus a `recipients` array.
+Receives **one day's batch** — `campaign`, a `callback_url`, and a `recipients`
+array holding only the leads due today. The app decides who and when; this
+workflow's job is to send and to report back.
+
+> **This workflow no longer sets `kanban_stage = sent_1` itself.** It POSTs the
+> outcome to `callback_url` and the app makes that transition. The reason is
+> the daily send limit: the app claims each lead as `sending` before handing it
+> over, and only a confirmed send moves it to `sent_1`. A lead that is still
+> `queued` is one that has genuinely never been emailed, which is what lets
+> tomorrow's batch safely take the next ten without re-sending to anyone.
 
 ```
 Webhook
   → Split Out (field: recipients)
   → Send Email                                  ← first cold email
-  → PocketBase: PATCH b2b_outreach/{outreach_id}   kanban_stage = sent_1
+  → HTTP Request: POST {{ $json.callback_url }}    ← REPORT THE SEND
+        header  x-webhook-secret: <WEBHOOK_SHARED_SECRET>
+        body    { "outreach_id": "…", "status": "success",
+                  "subject": "…", "body": "…" }
+        on error → same POST with "status": "failed" and an "error" string
   → Wait 2 days
   → PocketBase: GET b2b_outreach/{outreach_id}
   → IF kanban_stage != "replied"                ← THE AUTO-PAUSE
@@ -55,6 +68,16 @@ Webhook
 Personalisation available per recipient: `contact_name`, `company_name`,
 `website`, `linkedin_url`, plus `campaign.offer_description` and
 `campaign.from_email` as the sender.
+
+**Failure reporting matters as much as success.** A lead reported `failed`
+returns to the queue and is retried on a later day; after three attempts it
+parks in `send_failed`. A lead never reported at all sits in `sending` until
+the app's stale sweep releases it two hours later — which works, but delays
+that lead by a day. Wire the error branch.
+
+The callback is idempotent on the app's side: it only acts on leads currently
+in `sending`, so a duplicate POST is acknowledged and ignored rather than
+dragging a lead that has since replied back onto the board.
 
 ---
 

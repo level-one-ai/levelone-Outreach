@@ -67,21 +67,72 @@ export const sendMeetingSchema = z.object({
 /*  B2B                                                                  */
 /* -------------------------------------------------------------------- */
 
+/** "09:00" — 24-hour, zero-padded. */
+const timeOfDay = z
+  .string()
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "must be a 24-hour time like 09:00");
+
+/**
+ * An IANA zone name. Validated by asking Intl to use it rather than against a
+ * hardcoded list, so it stays correct as the tz database changes.
+ */
+const timezone = z.string().max(60).refine(
+  (tz) => {
+    try {
+      new Intl.DateTimeFormat("en-GB", { timeZone: tz });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  { message: "must be an IANA timezone like Europe/London" }
+);
+
 export const campaignSchema = z.object({
   title: z.string().min(2).max(160),
   offer_description: z.string().max(8000).default(""),
   from_email: z.string().email(),
   active: z.boolean().default(true),
+  /* The send controls. Capped at 200/day because anything beyond that from a
+     single address is a deliverability problem, not a scaling one. */
+  daily_send_limit: z.number().int().min(1).max(200).default(10),
+  send_time: timeOfDay.default("09:00"),
+  send_timezone: timezone.default("Europe/London"),
+  /** Starts off. Sending begins when you press Start, never on creation. */
+  sending_active: z.boolean().default(false),
+});
+
+/** Every field optional — a PATCH may touch only the send controls. */
+export const campaignUpdateSchema = campaignSchema.partial().extend({
+  id: z.string().min(1),
 });
 
 export const b2bScrapeSchema = z.object({
+  /** Which entry in lib/apify-actors.ts drives the form and the input shape. */
+  actor_profile: z.string().min(1),
+  /** The form's answers. `buildInput` turns these into the actor's JSON. */
+  form_values: z.record(z.union([z.string(), z.number()])).default({}),
+  /** What you searched for. Stamped on every contact so the pool is filterable. */
+  niche: z.string().max(160).default(""),
+  allow_unverified: z.boolean().default(false),
+});
+
+export const b2bEnrolSchema = z.object({
   campaign_id: z.string().min(1),
-  /**
-   * Passed straight through to your Apify actor as its input. Every actor
-   * takes a different shape, so this is deliberately not modelled further —
-   * the UI sends whatever the actor's own docs specify.
-   */
-  actor_input: z.record(z.unknown()),
+  contact_ids: z.array(z.string().min(1)).min(1).max(2000),
+});
+
+export const b2bLeadUpdateSchema = z.object({
+  id: z.string().min(1),
+  contact_name: z.string().max(160).optional(),
+  company_name: z.string().max(200).optional(),
+  niche: z.string().max(160).optional(),
+  pool_status: z.enum(["new", "in_campaign", "suppressed"]).optional(),
+});
+
+/** Body of the "send the next batch now" button. */
+export const dispatchNowSchema = z.object({
+  campaign_id: z.string().min(1),
 });
 
 export const b2bImportSchema = z.object({
@@ -100,13 +151,25 @@ export const b2bImportSchema = z.object({
     .max(2000),
   /** Enrol contacts that failed verification anyway. Off by default. */
   allow_unverified: z.boolean().default(false),
-  /** Fire the n8n sequence webhook immediately after enrolment. */
-  start_sequence: z.boolean().default(true),
 });
 
+/**
+ * Manual stage moves from the board.
+ *
+ * `sending` is absent on purpose: it is a claim owned by the dispatcher, and
+ * letting a human drop a lead into it by hand would strand that lead until the
+ * stale sweep picked it up.
+ */
 export const outreachStageSchema = z.object({
   outreach_id: z.string().min(1),
-  kanban_stage: z.enum(["sent_1", "followup_2d", "followup_5d", "replied"]),
+  kanban_stage: z.enum([
+    "queued",
+    "sent_1",
+    "followup_2d",
+    "followup_5d",
+    "replied",
+    "send_failed",
+  ]),
 });
 
 /* -------------------------------------------------------------------- */
@@ -152,6 +215,37 @@ export const inboundReplySchema = z
   .refine((v) => Boolean(v.outreach_id || v.contact_email), {
     message: "Provide either outreach_id or contact_email.",
   });
+
+/**
+ * Posted by n8n after it has actually sent (or failed to send) a first email.
+ *
+ * This is the signal the daily send limit is built on. A lead only becomes
+ * "emailed" when this arrives — so tomorrow's batch, which only ever selects
+ * `queued` runs, can never contain someone who already received the email.
+ *
+ * Accepts one result or an array of them, because an n8n loop may post per
+ * recipient or once with the whole batch.
+ */
+const emailSentResultSchema = z.object({
+  outreach_id: z.string().min(1),
+  status: z.enum(["success", "failed"]),
+  subject: z.string().max(300).default(""),
+  body: z.string().max(50_000).default(""),
+  sent_at: z.string().max(40).optional(),
+  /** Why it failed. Ignored on success. */
+  error: z.string().max(1000).default(""),
+});
+
+export const emailSentSchema = z.union([
+  emailSentResultSchema,
+  z.object({ results: z.array(emailSentResultSchema).min(1).max(500) }),
+  /* A bare array, for an n8n node that posts its whole item list. parseBody
+     unwraps a single-element array before this runs, so that case lands on the
+     first branch — this one catches batches of two or more. */
+  z.array(emailSentResultSchema).min(1).max(500),
+]);
+
+export type EmailSentResult = z.infer<typeof emailSentResultSchema>;
 
 /** Posted by the calendar tool (directly, or relayed through n8n). */
 export const calendarBookedSchema = z
